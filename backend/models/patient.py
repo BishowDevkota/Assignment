@@ -14,8 +14,8 @@ class Patient:
     @staticmethod
     def create(data):
         data = validate_and_sanitize(data)
-        required = ['gender', 'age', 'hypertension', 'ever_married', 'work_type', 'Residence_type',
-                    'avg_glucose_level', 'bmi', 'smoking_status', 'stroke']
+        required = ['gender', 'age', 'hypertension', 'heart_disease', 'ever_married', 'work_type', 
+                    'Residence_type', 'avg_glucose_level', 'bmi', 'smoking_status', 'stroke']
         for field in required:
             if field not in data:
                 from flask import abort

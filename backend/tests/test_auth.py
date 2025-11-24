@@ -10,9 +10,11 @@ def client():
     app.config['WTF_CSRF_ENABLED'] = False  # Disable CSRF for tests
     with app.test_client() as client:
         yield client
-    # Cleanup after each test
+    # Cleanup after each test - only delete test users, not all users
     mongo_client = MongoClient(Config.MONGO_URI)
-    mongo_client['strokedb']['users'].delete_many({})
+    # Delete only test users created during tests
+    mongo_client['strokedb']['users'].delete_one({"username": "testuser"})
+    mongo_client['strokedb']['users'].delete_one({"username": "sunil"})
 
 def test_register(client):
     """Test user registration."""
@@ -24,8 +26,8 @@ def test_register(client):
 def test_login_success(client):
     """Test successful login."""
     # Register first
-    client.post('/api/auth/register', json={"username": "loginuser", "password": "testpass123"})
-    rv = client.post('/api/auth/login', json={"username": "loginuser", "password": "testpass123"})
+    client.post('/api/auth/register', json={"username": "sunil", "password": "123456789"})
+    rv = client.post('/api/auth/login', json={"username": "sunil", "password": "123456789"})
     assert rv.status_code == 200
 
 def test_login_fail(client):

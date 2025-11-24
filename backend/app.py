@@ -4,6 +4,8 @@ from flask_wtf.csrf import CSRFProtect
 from flask_cors import CORS
 from config import Config
 from models.user import MongoUser
+from models.predictor import stroke_predictor
+
 from models.patient import Patient
 from utils import secure_route, validate_and_sanitize, logger
 from bson import ObjectId
@@ -152,6 +154,7 @@ def get_patients():
     - sort_order: 1=ascending, -1=descending (default=1)
     - filter_field: Field to filter by (optional)
     - filter_value: Value to filter (optional)
+    - test_records_only: Set to 'true' to return only test records (for testing)
     """
     # ====== Pagination ======
     page = int(request.args.get('page', 1))
@@ -165,9 +168,15 @@ def get_patients():
     # ====== Filtering ======
     filter_field = request.args.get('filter_field')
     filter_value = request.args.get('filter_value')
+    test_records_only = request.args.get('test_records_only', 'false').lower() == 'true'
+    
     query = {}
     if filter_field and filter_value:
         query[filter_field] = filter_value
+    
+    # For test isolation - only return test records if requested
+    if test_records_only:
+        query['test_record'] = True
 
     # ====== Fetch Patients ======
     patients = Patient.read_all(skip=skip, limit=per_page, sort_field=sort_field, sort_order=sort_order, query=query)
@@ -241,8 +250,22 @@ def create_patient():
     age = data.get('age')
     if age is None:
         return jsonify({"error": "Age is required"}), 400
-    if not (0 <= age <= 100):
-        return jsonify({"error": "Age must be between 0 and 100"}), 400
+    if not (0 <= age <= 120):
+        return jsonify({"error": "Age must be between 0 and 120 years"}), 400
+
+    # Validate glucose level (medical range: 40-600 mg/dL)
+    glucose = data.get('avg_glucose_level')
+    if glucose is None:
+        return jsonify({"error": "Average glucose level is required"}), 400
+    if not (40 <= glucose <= 600):
+        return jsonify({"error": "Glucose level must be between 40 and 600 mg/dL (realistic medical range)"}), 400
+
+    # Validate BMI (medical range: 10-80)
+    bmi = data.get('bmi')
+    if bmi is None:
+        return jsonify({"error": "BMI is required"}), 400
+    if not (10 <= bmi <= 80):
+        return jsonify({"error": "BMI must be between 10 and 80 (realistic medical range)"}), 400
 
     patient_id = Patient.create(data)
     return jsonify({"id": patient_id, "message": "Patient created"}), 201
@@ -258,8 +281,20 @@ def update_patient(patient_id):
     # Validate age if provided
     if 'age' in data:
         age = data['age']
-        if not (0 <= age <= 100):
-            return jsonify({"error": "Age must be between 0 and 100"}), 400
+        if not (0 <= age <= 120):
+            return jsonify({"error": "Age must be between 0 and 120 years"}), 400
+
+    # Validate glucose level if provided (medical range: 40-600 mg/dL)
+    if 'avg_glucose_level' in data:
+        glucose = data['avg_glucose_level']
+        if not (40 <= glucose <= 600):
+            return jsonify({"error": "Glucose level must be between 40 and 600 mg/dL (realistic medical range)"}), 400
+
+    # Validate BMI if provided (medical range: 10-80)
+    if 'bmi' in data:
+        bmi = data['bmi']
+        if not (10 <= bmi <= 80):
+            return jsonify({"error": "BMI must be between 10 and 80 (realistic medical range)"}), 400
 
     result = Patient.update(patient_id, data)
     return jsonify({"modified": result.modified_count, "message": "Patient updated"}), 200
@@ -270,6 +305,93 @@ def update_patient(patient_id):
 @secure_route
 @csrf.exempt
 def delete_patient(patient_id):
+    Patient.delete(patient_id)
+    return jsonify({"message": "Patient deleted"}), 200
+
+# ==========================
+# STROKE PREDICTION ROUTES
+# ==========================
+@app.route('/api/predict/stroke', methods=['POST'])
+@login_required
+@secure_route
+@csrf.exempt
+def predict_stroke():
+    """
+    Predict stroke risk based on patient data.
+    Accepts patient information and returns risk assessment.
+    """
+    data = get_post_data()
+    
+    try:
+        # Calculate risk score
+        prediction = stroke_predictor.calculate_risk_score(data)
+        
+        logger.info(f"Stroke risk prediction: {prediction['risk_level']} (score: {prediction['risk_score']})")
+        
+        return jsonify({
+            "prediction": prediction,
+            "patient_data": {
+                "age": data.get('age'),
+                "gender": data.get('gender'),
+                "hypertension": data.get('hypertension'),
+                "heart_disease": data.get('heart_disease'),
+                "avg_glucose_level": data.get('avg_glucose_level'),
+                "bmi": data.get('bmi'),
+                "smoking_status": data.get('smoking_status')
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Prediction error: {str(e)}")
+        return jsonify({"error": "Failed to calculate stroke risk"}), 500
+
+@app.route('/api/predict/patient/<patient_id>', methods=['GET'])
+@login_required
+@secure_route
+def predict_patient_stroke(patient_id):
+    """
+    Get stroke risk prediction for an existing patient.
+    """
+    patient = Patient.read_one(patient_id)
+    if not patient:
+        return jsonify({"error": "Patient not found"}), 404
+    
+    try:
+        # Calculate risk score
+        prediction = stroke_predictor.calculate_risk_score(patient)
+        
+        # Clean patient data for response
+        clean_patient = {}
+        for k, v in patient.items():
+            if isinstance(v, ObjectId):
+                clean_patient[k] = str(v)
+            elif isinstance(v, float) and math.isnan(v):
+                clean_patient[k] = None
+            else:
+                clean_patient[k] = v
+        
+        return jsonify({
+            "prediction": prediction,
+            "patient": clean_patient
+        }), 200
+    except Exception as e:
+        logger.error(f"Prediction error for patient {patient_id}: {str(e)}")
+        return jsonify({"error": "Failed to calculate stroke risk"}), 500
+
+@app.route('/api/predict/statistics', methods=['GET'])
+@login_required
+@secure_route
+def get_prediction_statistics():
+    """
+    Get dataset statistics for stroke prediction context.
+    """
+    try:
+        stats = stroke_predictor.get_dataset_statistics()
+        return jsonify(stats), 200
+    except Exception as e:
+        logger.error(f"Statistics error: {str(e)}")
+        return jsonify({"error": "Failed to retrieve statistics"}), 500
+
+
     Patient.delete(patient_id)
     return jsonify({"message": "Patient deleted"}), 200
 
